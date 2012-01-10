@@ -1,0 +1,243 @@
+<?php
+function uuid_features_menu_menu() {
+  $items = array();
+  $items['admin/build/features/mluuids'] = array(
+    'title' => 'Generate UUIDs for Menu Items',
+    'type' => MENU_LOCAL_TASK,
+    'page callback' => 'uuid_features_menu_generate_page',
+    'access arguments' => array('manage features'),
+    'weight' => 100,
+  );
+  return $items;
+}
+
+/**
+ * Implementation of hook_features_api().
+ */
+function uuid_features_menu_features_api() {
+  return array(
+    'menu_uuid_links' => array(
+      'name' => t('Menu links (UUID)'),
+      'default_hook' => 'menu_default_menu_uuid_links',
+      'feature_source' => TRUE,
+      'default_file' => FEATURES_DEFAULTS_INCLUDED,
+      'file' => drupal_get_path('module', 'uuid_features_menu') .'/uuid_features_menu.features.inc',
+    ),
+  );
+}
+
+function uuid_features_menu_generate_page() {
+  $batch = array(
+    'title' => t('Generate UUIDs for Menu Items'),
+    'operations' => array(
+      array('uuid_features_menu_generate_batch', array($_GET['destination'])),
+    ),
+    'finished' => 'uuid_features_menu_generate_batch_finished',
+  );
+  batch_set($batch);
+  batch_process();
+}
+
+function uuid_features_menu_generate_batch($destination, &$context) {
+  if (empty($context['sandbox'])) {
+    $context['sandbox']['progress'] = 0;
+    $context['sandbox']['max'] = db_result(db_query("SELECT COUNT(*) FROM {menu_links} WHERE uuid IS NULL"));
+  }
+  $limit = 50;
+  $result = db_query_range("SELECT mlid, link_title FROM {menu_links} WHERE uuid IS NULL ORDER BY mlid ASC", array(), 0, $limit);
+  while ($row = db_fetch_array($result)) {
+    uuid_features_menu_link_set_uuid($row['mlid']);
+    $context['results'][] = $row['mlid'] .' : '. $row['link_title'];
+    $context['sandbox']['progress']++;
+    $context['message'] = $row['link_title'];
+  }
+  if ($context['sandbox']['progress'] != $context['sandbox']['max']) {
+    $context['finished'] = $context['sandbox']['progress'] / $context['sandbox']['max'];
+  } else {
+    $_SESSION['destination'] = $destination;
+  }
+}
+
+function uuid_features_menu_generate_batch_finished($success, $results, $operations) {
+  cache_clear_all('*', 'cache_menu', TRUE);
+  if ($success) {
+    $message = t('Finished generating UUIDs for menu items.');
+  }
+  else {
+    $message = t('Finished with an error.');
+  }
+  drupal_set_message($message);
+  // Providing data for the redirected page is done through $_SESSION.
+  $destination = isset($_SESSION['destination']) ? $_SESSION['destination'] : 'admin/build/features';
+  drupal_goto($destination);
+}
+
+function uuid_features_menu_link_set_uuid($mlid, $uuid = FALSE) {
+  if (!$uuid) $uuid = uuid_uuid();
+  db_query("UPDATE {menu_links} SET uuid = '%s', customized = 1 WHERE mlid = %d", $uuid, $mlid);
+  return $uuid;
+}
+
+function uuid_features_menu_link_load($uuid) {
+  $result = db_query("SELECT menu_name, mlid, plid, link_path, router_path, link_title, options, module, hidden, external, has_children, expanded, weight, uuid FROM {menu_links} WHERE uuid = '%s'", $uuid);
+  while ($link = db_fetch_array($result)) {
+    $link['options'] = unserialize($link['options']);
+    return $link;
+  }
+  return FALSE;
+}
+
+function uuid_features_menu_link_uuid($link) {
+  if (!empty($link['uuid'])) {
+    return $link['uuid'];
+  } else {
+  	$uuid = db_result(db_query("SELECT uuid FROM {menu_links} WHERE mlid = %d", $link['mlid']));
+  	if (!empty($uuid)) return $uuid;
+  }
+  return FALSE;
+}
+
+function uuid_features_menu_encode_path($path) {
+  $router = menu_router_build();
+  $args = explode('/', $path);
+  $router_path = _menu_find_router_path($path);
+  $router_item = $router[$router_path];
+  $load_functions = unserialize($router_item['load_functions']);
+  foreach ((array)$load_functions as $arg => $load_function) {
+    if (is_array($load_function)) {
+      $keys = array_keys($load_function);
+      $load_function = $keys[0];
+    }
+
+    switch ($load_function) {
+      case 'node_load':
+        $node = node_load($args[$arg]);
+        $args[$arg] = $node->uuid;
+        break;
+      case 'user_load':
+        $user = user_load($args[$arg]);
+        $args[$arg] = $node->uuid;
+        break;
+    }
+  }
+  $uuid_path = implode('/', $args);
+  if ($uuid_path == $path) return FALSE;
+  return $uuid_path;
+}
+
+function uuid_features_menu_resolve_path($path) {
+  $router = menu_router_build();
+  $args = explode('/', $path);
+  $router_path = _menu_find_router_path($path);
+  $router_item = $router[$router_path];
+  $load_functions = unserialize($router_item['load_functions']);
+  foreach ((array)$load_functions as $arg => $load_function) {
+    if (is_array($load_function)) {
+      $keys = array_keys($load_function);
+      $load_function = $keys[0];
+    }
+
+    switch ($load_function) {
+      case 'node_load':
+        if ($node = node_get_by_uuid($args[$arg])) {
+          $args[$arg] = $node->nid;
+        } else {
+          return FALSE;
+        }
+        break;
+      case 'user_load':
+        if ($user = user_get_by_uuid($args[$arg])) {
+          $args[$arg] = $user->uid;
+        } else {
+          return FALSE;
+        }
+        break;
+    }
+  }
+  return implode('/', $args);
+}
+
+function _uuid_features_menu_generate_uuids() {
+  // If all the menu items already have uuids do nothing.
+  if (db_result(db_query("SELECT COUNT(*) FROM {menu_links} WHERE uuid IS NULL")) == 0) return;
+
+  // If we're not using Postgres set all the missing uuids.
+  if ($GLOBALS['db_type'] != 'pgsql') {
+  	db_query("UPDATE {menu_links} SET uuid = UUID() WHERE uuid IS NULL");
+    cache_clear_all('*', 'cache_menu', TRUE);
+    return;
+  }
+
+  // If we are using postgres direct the user to another page to generate the uuids. This
+  // allows us to use the batch api and avoid time out errors.
+  $message = t("<a href='@gen-uuid-page'>Postgres doesn't currently have UUID functions build in. Please click here to generate UUIDs for your missing menu items.</a>", array('@gen-uuid-page' => url('admin/build/features/mluuids', array('query' => array('destination' => drupal_get_destination())))));
+  drupal_set_message($message, 'warning', FALSE);
+}
+
+function _uuid_features_menu_get_links() {
+  // We can't use the menu_tree_all_data function as it statically caches it's menu items
+  // so if a menu appears on the page which contains items we can't see (i.e. a log out link)
+  // they won't appear as options to export. Instead we reproduce the essential parts of the
+  // function here.
+
+  static $menu_links = array();
+  if (!empty($menu_links)) return $menu_links;
+
+  foreach (array_reverse(menu_get_menus()) as $menu_name => $menu_title) {
+    $data = array();
+  	$cid = 'links:' . $menu_name . ':all-cid:0';
+  	$cache = cache_get($cid, 'cache_menu');
+    if ($cache && isset($cache->data)) {
+      // If the cache entry exists, it will just be the cid for the actual data.
+      // This avoids duplication of large amounts of data.
+      $cache = cache_get($cache->data, 'cache_menu');
+      if ($cache && isset($cache->data)) {
+        $data = $cache->data;
+      }
+    } else {
+      $data['tree'] = menu_tree_data(db_query("
+        SELECT m.load_functions, m.to_arg_functions, m.access_callback, m.access_arguments, m.page_callback, m.page_arguments, m.title, m.title_callback, m.title_arguments, m.type, m.description, ml.*
+        FROM {menu_links} ml LEFT JOIN {menu_router} m ON m.path = ml.router_path
+        WHERE ml.menu_name = '%s'
+        ORDER BY p1 ASC, p2 ASC, p3 ASC, p4 ASC, p5 ASC, p6 ASC, p7 ASC, p8 ASC, p9 ASC", $menu_name));
+
+      $data['node_links'] = array();
+      menu_tree_collect_node_links($data['tree'], $data['node_links']);
+      // May as well cache the data, if it is not already in the cache.
+      $tree_cid = _menu_tree_cid($menu_name, $data);
+      if (!cache_get($tree_cid, 'cache_menu')) {
+        cache_set($tree_cid, $data, 'cache_menu');
+      }
+      // Cache the cid of the (shared) data using the menu and item-specific cid.
+      cache_set($cid, $tree_cid, 'cache_menu');
+    }
+
+    $GLOBALS['menu_admin'] = TRUE;
+    menu_tree_check_access($data['tree'], $data['node_links']);
+    $GLOBALS['menu_admin'] = FALSE;
+    
+    _uuid_features_menu_get_links_recurse($data['tree'], $menu_name, '--', $menu_links);
+  }
+
+  return $menu_links;
+}
+
+function _uuid_features_menu_get_links_recurse($tree, $menu_name, $indent, &$menu_links) {
+  // We don't want to use _menu_parents_recurse as that could potentially cut out some 
+  // options as not being suitable for parents which we still want to export.
+
+  foreach ($tree as $data) {
+    if ($data['link']['hidden'] >= 0) {
+      $title = $indent . ' ' . truncate_utf8($data['link']['title'], 30, TRUE, FALSE);
+      if ($data['link']['hidden']) {
+        $title .= ' (' . t('disabled') . ')';
+      }
+      if (!empty($data['link']['uuid'])) {
+        $menu_links[$data['link']['uuid']] = "{$menu_name}: {$title}";
+        if ($data['below']) {
+          _uuid_features_menu_get_links_recurse($data['below'], $menu_name, $indent . '--', $menu_links);
+        }
+      }
+    }
+  } 
+} 

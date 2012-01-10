@@ -1,0 +1,33 @@
+<?php
+/**
+ * Implementation of hook_schema_alter();
+ */
+function uuid_features_menu_schema_alter(&$schema) {
+  if (isset($schema['menu_links'])) {
+    $schema['menu_links']['fields']['uuid'] = array(
+      'type' => 'varchar',
+      'length' => 64,
+      'description' => 'The Universally Unique Identifier.',
+    );
+  }
+}
+
+/**
+ * Implementaton of hook_install().
+ */
+function uuid_features_menu_install() {
+  $ret = array();
+  $schema = array('menu_links' => array());
+  uuid_features_menu_schema_alter($schema);
+  db_add_field($ret, 'menu_links', 'uuid', $schema['menu_links']['fields']['uuid']);
+  return $ret;
+}
+
+/**
+ * Implementaton of hook_uninstall().
+ */
+function uuid_features_menu_uninstall() {
+  $ret = array();
+  db_drop_field($ret, 'menu_links', 'uuid');
+  return $ret;
+}
